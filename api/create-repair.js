@@ -1,6 +1,7 @@
 import admin from "firebase-admin";
 import { put } from "@vercel/blob";
 import Busboy from "busboy";
+import webPush from "web-push";
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -13,6 +14,18 @@ if (!admin.apps.length) {
 }
 
 const db = admin.firestore();
+
+function configureWebPush() {
+  const publicKey = process.env.VAPID_PUBLIC_KEY;
+  const privateKey = process.env.VAPID_PRIVATE_KEY;
+  const subject = process.env.VAPID_SUBJECT;
+
+  if (!publicKey || !privateKey || !subject) {
+    throw new Error("Missing VAPID environment variables");
+  }
+
+  webPush.setVapidDetails(subject, publicKey, privateKey);
+}
 
 function parseForm(req) {
   return new Promise((resolve, reject) => {
@@ -51,6 +64,48 @@ function parseForm(req) {
 
     req.pipe(busboy);
   });
+}
+
+async function sendAdminPushNotifications({ repairId, deviceName, issue }) {
+  configureWebPush();
+
+  const snapshot = await db
+    .collection("adminPushSubscriptions")
+    .where("active", "==", true)
+    .get();
+
+  if (snapshot.empty) return;
+
+  const payload = JSON.stringify({
+    title: "New repair request",
+    body: `${deviceName || "Unknown device"} - ${issue || "No issue provided"}`,
+    url: `/admin.html?repairId=${repairId}`,
+    repairId,
+  });
+
+  await Promise.allSettled(
+    snapshot.docs.map(async (docSnap) => {
+      const { subscription } = docSnap.data();
+
+      if (!subscription?.endpoint) return;
+
+      try {
+        await webPush.sendNotification(subscription, payload);
+      } catch (err) {
+        const isExpired = err.statusCode === 404 || err.statusCode === 410;
+
+        if (isExpired) {
+          await docSnap.ref.update({
+            active: false,
+            disabledAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          return;
+        }
+
+        console.error("Push notification failed:", err.message || err);
+      }
+    })
+  );
 }
 
 export const config = {
@@ -135,6 +190,16 @@ export default async function handler(req, res) {
       read: false,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    try {
+      await sendAdminPushNotifications({
+        repairId: repairRef.id,
+        deviceName: fields.deviceName,
+        issue: fields.issue,
+      });
+    } catch (pushErr) {
+      console.error("Admin push send failed:", pushErr.message || pushErr);
+    }
 
     return res.status(200).json({
       success: true,

@@ -1,1 +1,2 @@
 # bennyfix-backend
+Then commit and push the backend repo so Vercel redeploys. The next piece is still needed: the admin dashboard must save phone subscriptions into adminPushSubscriptions, otherwise there are no phones for create-repair.js to notify yet.

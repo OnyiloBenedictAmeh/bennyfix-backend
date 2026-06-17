@@ -74,6 +74,8 @@ async function sendAdminPushNotifications({ repairId, deviceName, issue }) {
     .where("active", "==", true)
     .get();
 
+  console.log("Active push subscriptions:", snapshot.size);
+
   if (snapshot.empty) return;
 
   const payload = JSON.stringify({
@@ -83,15 +85,26 @@ async function sendAdminPushNotifications({ repairId, deviceName, issue }) {
     repairId,
   });
 
-  await Promise.allSettled(
+  const results = await Promise.allSettled(
     snapshot.docs.map(async (docSnap) => {
       const { subscription } = docSnap.data();
 
-      if (!subscription?.endpoint) return;
+      if (!subscription?.endpoint) {
+        console.log("Missing subscription endpoint:", docSnap.id);
+        return;
+      }
 
       try {
         await webPush.sendNotification(subscription, payload);
+        console.log("Push sent:", docSnap.id);
       } catch (err) {
+        console.error("Push notification failed:", {
+          id: docSnap.id,
+          statusCode: err.statusCode,
+          message: err.message,
+          body: err.body,
+        });
+
         const isExpired = err.statusCode === 404 || err.statusCode === 410;
 
         if (isExpired) {
@@ -99,15 +112,13 @@ async function sendAdminPushNotifications({ repairId, deviceName, issue }) {
             active: false,
             disabledAt: admin.firestore.FieldValue.serverTimestamp(),
           });
-          return;
         }
-
-        console.error("Push notification failed:", err.message || err);
       }
     })
   );
-}
 
+  console.log("Push send results:", results.map((result) => result.status));
+}
 export const config = {
   api: {
     bodyParser: false,

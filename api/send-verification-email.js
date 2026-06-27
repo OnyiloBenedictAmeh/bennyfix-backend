@@ -25,6 +25,36 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Fail fast with a clear message if required env vars are missing,
+    // instead of letting Firebase throw a confusing low-level error later.
+    const requiredEnvVars = [
+      "APP_URL",
+      "FIREBASE_PROJECT_ID",
+      "FIREBASE_CLIENT_EMAIL",
+      "FIREBASE_PRIVATE_KEY",
+      "RESEND_API_KEY",
+      "EMAIL_FROM",
+    ];
+    const missing = requiredEnvVars.filter((key) => !process.env[key]);
+    if (missing.length) {
+      console.error("Missing required env vars:", missing.join(", "));
+      return res.status(500).json({
+        error: `Server misconfigured: missing ${missing.join(", ")}`,
+      });
+    }
+
+    // APP_URL must be a full URL (e.g. https://example.github.io/site),
+    // not just a bare domain, or Firebase will reject the continue URL.
+    let appUrl;
+    try {
+      appUrl = new URL(process.env.APP_URL);
+    } catch {
+      console.error("APP_URL is not a valid URL:", process.env.APP_URL);
+      return res.status(500).json({
+        error: "Server misconfigured: APP_URL is not a valid URL",
+      });
+    }
+
     const authHeader = req.headers.authorization || "";
     const idToken = authHeader.replace("Bearer ", "");
 
@@ -35,12 +65,19 @@ export default async function handler(req, res) {
     const decoded = await admin.auth().verifyIdToken(idToken);
     const user = await admin.auth().getUser(decoded.uid);
 
+    if (!user.email) {
+      return res.status(400).json({ error: "Account has no email on file" });
+    }
+
     if (user.emailVerified) {
       return res.status(200).json({ success: true, alreadyVerified: true });
     }
 
+    const continueUrl = new URL("index.html", appUrl);
+    continueUrl.searchParams.set("email", user.email);
+
     const link = await admin.auth().generateEmailVerificationLink(user.email, {
-      url: `${process.env.APP_URL}/index.html`,
+      url: continueUrl.toString(),
       handleCodeInApp: false,
     });
 

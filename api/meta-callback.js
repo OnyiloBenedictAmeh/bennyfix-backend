@@ -153,6 +153,7 @@ async function connectFacebook(code) {
   // A Page token derived this way stays valid as long as the admin keeps
   // their role on the Page — no 60-day refresh needed for this part.
   const pagesUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/me/accounts`);
+  pagesUrl.searchParams.set("fields", "id,name,access_token,tasks");
   pagesUrl.searchParams.set("access_token", longData.access_token);
 
   const pagesRes = await fetch(pagesUrl.toString());
@@ -163,6 +164,10 @@ async function connectFacebook(code) {
   }
 
   const page = pagesData.data[0];
+
+  if (!page.access_token) {
+    throw new Error("Facebook Page token missing. Check Page permissions and reconnect.");
+  }
 
   await db.collection("integrations").doc("meta").set(
     {

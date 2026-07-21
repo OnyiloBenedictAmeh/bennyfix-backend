@@ -63,13 +63,21 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No platforms selected on this post" });
     }
 
-    const metaSnap = await db.collection("integrations").doc("meta").get();
+    let metaSnap = await db.collection("integrations").doc(decoded.uid).get();
+    if (!metaSnap.exists) {
+      metaSnap = await db.collection("integrations").doc("meta").get();
+    }
     const meta = metaSnap.exists ? metaSnap.data() : {};
 
     const results = {};
 
     if (requestedPlatforms.includes("facebook")) {
-      results.facebook = await publishToFacebook({ meta, caption, images }).catch((err) => ({
+      results.facebook = await publishToFacebook({
+        meta,
+        caption,
+        images,
+        pageIds: post.facebookPageIds || [],
+      }).catch((err) => ({
         success: false,
         error: err.message,
       }));
@@ -97,16 +105,77 @@ export default async function handler(req, res) {
   }
 }
 
-async function publishToFacebook({ meta, caption, images }) {
-  const pageId = meta.facebook?.pageId;
-  const token = meta.facebook?.pageAccessToken;
+async function publishToFacebook({ meta, caption, images, pageIds = [] }) {
+  const pages = normalizeFacebookPagesForPublish(meta.facebook);
 
-  if (!pageId || !token) {
-    throw new Error("Facebook isn't connected yet");
+  if (!pages.length) {
+    throw new Error("No Facebook Pages connected");
+  }
+
+  const selectedPageIds = pageIds.length ? new Set(pageIds) : null;
+  const targetPages = selectedPageIds
+    ? pages.filter((page) => selectedPageIds.has(page.pageId))
+    : pages;
+
+  if (!targetPages.length) {
+    throw new Error("No selected Facebook Pages are connected");
   }
 
   const base = `https://graph.facebook.com/${GRAPH_VERSION}`;
+  const results = {};
 
+  for (const page of targetPages) {
+    const pageId = page.pageId;
+    const token = page.pageAccessToken;
+
+    if (!pageId || !token) {
+      results[pageId || page.pageName || "unknown"] = {
+        success: false,
+        error: "Missing Facebook Page token",
+      };
+      continue;
+    }
+
+    results[pageId] = await publishToFacebookPage({
+      base,
+      pageId,
+      token,
+      caption,
+      images,
+      pageName: page.pageName,
+    }).catch((err) => ({
+      success: false,
+      pageId,
+      pageName: page.pageName,
+      error: err.message,
+    }));
+  }
+
+  const anySucceeded = Object.values(results).some((result) => result.success);
+
+  return {
+    success: anySucceeded,
+    pages: results,
+  };
+}
+
+function normalizeFacebookPagesForPublish(facebook = {}) {
+  if (Array.isArray(facebook.pages) && facebook.pages.length) {
+    return facebook.pages;
+  }
+
+  if (facebook.pageId && facebook.pageAccessToken) {
+    return [{
+      pageId: facebook.pageId,
+      pageName: facebook.pageName || "Facebook Page",
+      pageAccessToken: facebook.pageAccessToken,
+    }];
+  }
+
+  return [];
+}
+
+async function publishToFacebookPage({ base, pageId, token, caption, images, pageName }) {
   if (!images.length) {
     const res = await fetch(`${base}/${pageId}/feed`, {
       method: "POST",
@@ -116,7 +185,7 @@ async function publishToFacebook({ meta, caption, images }) {
 
     const data = await res.json();
     if (!res.ok) throw new Error(data.error?.message || "Facebook post failed");
-    return { success: true, id: data.id };
+    return { success: true, pageId, pageName, id: data.id };
   }
 
   if (images.length === 1) {
@@ -132,7 +201,7 @@ async function publishToFacebook({ meta, caption, images }) {
 
     const data = await res.json();
     if (!res.ok) throw new Error(data.error?.message || "Facebook photo post failed");
-    return { success: true, id: data.id || data.post_id };
+    return { success: true, pageId, pageName, id: data.id || data.post_id };
   }
 
   // Multiple images: upload each unpublished, then attach all to one feed post.
@@ -168,7 +237,12 @@ async function publishToFacebook({ meta, caption, images }) {
   const feedData = await feedRes.json();
   if (!feedRes.ok) throw new Error(feedData.error?.message || "Facebook multi-photo post failed");
 
-  return { success: true, id: feedData.id };
+  return {
+    success: true,
+    pageId,
+    pageName,
+    id: feedData.id,
+  };
 }
 
 async function publishToInstagram({ meta, caption, images }) {
@@ -183,7 +257,7 @@ async function publishToInstagram({ meta, caption, images }) {
     throw new Error("Instagram posts need at least one image");
   }
 
-  const base = "https://graph.instagram.com";
+  const base = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
   if (images.length === 1) {
     const creationId = await createContainer({

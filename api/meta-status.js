@@ -40,13 +40,16 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Admin only" });
     }
 
-    const metaSnap = await db.collection("integrations").doc("meta").get();
+    let metaSnap = await db.collection("integrations").doc(decoded.uid).get();
+    if (!metaSnap.exists) {
+      metaSnap = await db.collection("integrations").doc("meta").get();
+    }
     const meta = metaSnap.exists ? metaSnap.data() : {};
 
     return res.status(200).json({
       facebook: {
-        connected: !!meta.facebook?.pageAccessToken,
-        pageName: meta.facebook?.pageName || null,
+        connected: (meta.facebook?.pages || []).length > 0 || !!meta.facebook?.pageAccessToken,
+        pages: normalizeFacebookPages(meta.facebook),
       },
       instagram: {
         connected: !!meta.instagram?.accessToken,
@@ -57,4 +60,24 @@ export default async function handler(req, res) {
     console.error(err);
     return res.status(500).json({ error: err.message || "Could not load status" });
   }
+}
+
+function normalizeFacebookPages(facebook = {}) {
+  if (Array.isArray(facebook.pages) && facebook.pages.length) {
+    return facebook.pages.map((page) => ({
+      pageId: page.pageId,
+      pageName: page.pageName,
+      tasks: page.tasks || [],
+    }));
+  }
+
+  if (facebook.pageId) {
+    return [{
+      pageId: facebook.pageId,
+      pageName: facebook.pageName || "Facebook Page",
+      tasks: facebook.tasks || [],
+    }];
+  }
+
+  return [];
 }

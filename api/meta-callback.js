@@ -60,9 +60,9 @@ export default async function handler(req, res) {
     }
 
     if (platform === "instagram") {
-      await connectInstagram(code);
+      await connectInstagram(code, decoded.uid);
     } else if (platform === "facebook") {
-      await connectFacebook(code);
+      await connectFacebook(code, decoded.uid);
     } else {
       return redirectToAdmin(res, "error", "Unknown platform");
     }
@@ -74,31 +74,25 @@ export default async function handler(req, res) {
   }
 }
 
-async function connectInstagram(code) {
-  // Step 1: exchange the authorization code for a short-lived token.
-  const form = new URLSearchParams();
-  form.set("client_id", APP_ID);
-  form.set("client_secret", APP_SECRET);
-  form.set("grant_type", "authorization_code");
-  form.set("redirect_uri", REDIRECT_URI);
-  form.set("code", code);
+async function connectInstagram(code, uid) {
+  const shortUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
+  shortUrl.searchParams.set("client_id", APP_ID);
+  shortUrl.searchParams.set("client_secret", APP_SECRET);
+  shortUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+  shortUrl.searchParams.set("code", code);
 
-  const shortRes = await fetch("https://api.instagram.com/oauth/access_token", {
-    method: "POST",
-    body: form,
-  });
-
+  const shortRes = await fetch(shortUrl.toString());
   const shortData = await shortRes.json();
 
   if (!shortRes.ok || !shortData.access_token) {
-    throw new Error(shortData.error_message || "Instagram token exchange failed");
+    throw new Error(shortData.error?.message || "Instagram token exchange failed");
   }
 
-  // Step 2: exchange for a long-lived token (60 days, refreshable before expiry).
-  const longUrl = new URL("https://graph.instagram.com/access_token");
-  longUrl.searchParams.set("grant_type", "ig_exchange_token");
+  const longUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
+  longUrl.searchParams.set("grant_type", "fb_exchange_token");
+  longUrl.searchParams.set("client_id", APP_ID);
   longUrl.searchParams.set("client_secret", APP_SECRET);
-  longUrl.searchParams.set("access_token", shortData.access_token);
+  longUrl.searchParams.set("fb_exchange_token", shortData.access_token);
 
   const longRes = await fetch(longUrl.toString());
   const longData = await longRes.json();
@@ -107,11 +101,41 @@ async function connectInstagram(code) {
     throw new Error(longData.error?.message || "Instagram long-lived token exchange failed");
   }
 
-  await db.collection("integrations").doc("meta").set(
+  const pagesUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/me/accounts`);
+  pagesUrl.searchParams.set(
+    "fields",
+    "id,name,access_token,instagram_business_account{id,username},connected_instagram_account{id,username}"
+  );
+  pagesUrl.searchParams.set("access_token", longData.access_token);
+  pagesUrl.searchParams.set("limit", "100");
+
+  const pagesRes = await fetch(pagesUrl.toString());
+  const pagesData = await pagesRes.json();
+
+  if (!pagesRes.ok || !pagesData.data?.length) {
+    throw new Error(pagesData.error?.message || "No Facebook Pages found for Instagram connection");
+  }
+
+  const instagramPage = pagesData.data.find(
+    (page) => page.instagram_business_account?.id || page.connected_instagram_account?.id
+  );
+  const instagramAccount =
+    instagramPage?.instagram_business_account || instagramPage?.connected_instagram_account;
+
+  if (!instagramAccount?.id) {
+    throw new Error("No Instagram business account is connected to your Facebook Pages");
+  }
+
+  await db.collection("integrations")
+    .doc(uid)
+    .set(
     {
       instagram: {
-        userId: shortData.user_id,
-        accessToken: longData.access_token,
+        userId: instagramAccount.id,
+        username: instagramAccount.username || null,
+        pageId: instagramPage.id,
+        pageName: instagramPage.name,
+        accessToken: instagramPage.access_token || longData.access_token,
         obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
         expiresInSeconds: longData.expires_in || null,
       },
@@ -120,7 +144,7 @@ async function connectInstagram(code) {
   );
 }
 
-async function connectFacebook(code) {
+async function connectFacebook(code, uid) {
   // Step 1: exchange the authorization code for a short-lived user token.
   const shortUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
   shortUrl.searchParams.set("client_id", APP_ID);
@@ -149,12 +173,13 @@ async function connectFacebook(code) {
     throw new Error(longData.error?.message || "Facebook long-lived token exchange failed");
   }
 
-  // Step 3: find the Page this user manages and grab its Page access token.
+  // Step 3: fetch every Page this account manages — not just the first.
   // A Page token derived this way stays valid as long as the admin keeps
   // their role on the Page — no 60-day refresh needed for this part.
   const pagesUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/me/accounts`);
   pagesUrl.searchParams.set("fields", "id,name,access_token,tasks");
   pagesUrl.searchParams.set("access_token", longData.access_token);
+  pagesUrl.searchParams.set("limit", "100");
 
   const pagesRes = await fetch(pagesUrl.toString());
   const pagesData = await pagesRes.json();
@@ -163,18 +188,23 @@ async function connectFacebook(code) {
     throw new Error(pagesData.error?.message || "No Facebook Pages found for this account");
   }
 
-  const page = pagesData.data[0];
+  const pages = pagesData.data.map((page) => ({
+    pageId: page.id,
+    pageName: page.name,
+    pageAccessToken: page.access_token,
+    tasks: page.tasks || [],
+    connected: true,
+  }));
 
-  if (!page.access_token) {
-    throw new Error("Facebook Page token missing. Check Page permissions and reconnect.");
-  }
-
-  await db.collection("integrations").doc("meta").set(
+  // Full overwrite: /me/accounts always returns the complete current set
+  // for this login, so this naturally drops Pages you no longer manage.
+  await db.collection("integrations")
+    .doc(uid)
+    .set(
     {
       facebook: {
-        pageId: page.id,
-        pageName: page.name,
-        pageAccessToken: page.access_token,
+        accessToken: longData.access_token,
+        pages,
         connectedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
     },

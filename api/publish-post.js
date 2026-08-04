@@ -121,7 +121,9 @@ async function publishToFacebook({ meta, caption, images, pageIds = [] }) {
     throw new Error("No selected Facebook Pages are connected");
   }
 
-  const base = `https://graph.facebook.com/${GRAPH_VERSION}`;
+  const base = meta.instagram?.authType === "instagram_login"
+    ? `https://graph.instagram.com/${GRAPH_VERSION}`
+    : `https://graph.facebook.com/${GRAPH_VERSION}`;
   const results = {};
 
   for (const page of targetPages) {
@@ -257,7 +259,9 @@ async function publishToInstagram({ meta, caption, images }) {
     throw new Error("Instagram posts need at least one image");
   }
 
-  const base = `https://graph.facebook.com/${GRAPH_VERSION}`;
+  const base = meta.instagram?.authType === "instagram_login"
+    ? `https://graph.instagram.com/${GRAPH_VERSION}`
+    : `https://graph.facebook.com/${GRAPH_VERSION}`;
 
   if (images.length === 1) {
     const creationId = await createContainer({

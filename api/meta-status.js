@@ -54,6 +54,9 @@ export default async function handler(req, res) {
       instagram: {
         connected: !!meta.instagram?.accessToken,
         userId: meta.instagram?.userId || null,
+        username: meta.instagram?.username || null,
+        accountType: meta.instagram?.accountType || null,
+        authType: meta.instagram?.authType || null,
       },
     });
   } catch (err) {

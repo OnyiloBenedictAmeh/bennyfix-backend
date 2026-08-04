@@ -15,6 +15,8 @@ const db = admin.firestore();
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 const APP_ID = process.env.META_APP_ID;
 const APP_SECRET = process.env.META_APP_SECRET;
+const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
+const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET;
 // Must exactly match what's registered in the Meta App Dashboard and what
 // the frontend used to build the authorize URL. No query string on this one
 // on purpose — the platform is carried in `state` instead, so we only ever
@@ -75,24 +77,31 @@ export default async function handler(req, res) {
 }
 
 async function connectInstagram(code, uid) {
-  const shortUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
-  shortUrl.searchParams.set("client_id", APP_ID);
-  shortUrl.searchParams.set("client_secret", APP_SECRET);
-  shortUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-  shortUrl.searchParams.set("code", code);
+  if (!INSTAGRAM_APP_ID || !INSTAGRAM_APP_SECRET) {
+    throw new Error("Instagram app credentials are not configured");
+  }
 
-  const shortRes = await fetch(shortUrl.toString());
+  const shortRes = await fetch("https://api.instagram.com/oauth/access_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: INSTAGRAM_APP_ID,
+      client_secret: INSTAGRAM_APP_SECRET,
+      grant_type: "authorization_code",
+      redirect_uri: REDIRECT_URI,
+      code,
+    }),
+  });
   const shortData = await shortRes.json();
 
-  if (!shortRes.ok || !shortData.access_token) {
+  if (!shortRes.ok || !shortData.access_token || !shortData.user_id) {
     throw new Error(shortData.error?.message || "Instagram token exchange failed");
   }
 
-  const longUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
-  longUrl.searchParams.set("grant_type", "fb_exchange_token");
-  longUrl.searchParams.set("client_id", APP_ID);
-  longUrl.searchParams.set("client_secret", APP_SECRET);
-  longUrl.searchParams.set("fb_exchange_token", shortData.access_token);
+  const longUrl = new URL("https://graph.instagram.com/access_token");
+  longUrl.searchParams.set("grant_type", "ig_exchange_token");
+  longUrl.searchParams.set("client_secret", INSTAGRAM_APP_SECRET);
+  longUrl.searchParams.set("access_token", shortData.access_token);
 
   const longRes = await fetch(longUrl.toString());
   const longData = await longRes.json();
@@ -101,29 +110,15 @@ async function connectInstagram(code, uid) {
     throw new Error(longData.error?.message || "Instagram long-lived token exchange failed");
   }
 
-  const pagesUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/me/accounts`);
-  pagesUrl.searchParams.set(
-    "fields",
-    "id,name,access_token,instagram_business_account{id,username},connected_instagram_account{id,username}"
-  );
-  pagesUrl.searchParams.set("access_token", longData.access_token);
-  pagesUrl.searchParams.set("limit", "100");
+  const profileUrl = new URL(`https://graph.instagram.com/${GRAPH_VERSION}/${shortData.user_id}`);
+  profileUrl.searchParams.set("fields", "user_id,username,account_type");
+  profileUrl.searchParams.set("access_token", longData.access_token);
 
-  const pagesRes = await fetch(pagesUrl.toString());
-  const pagesData = await pagesRes.json();
+  const profileRes = await fetch(profileUrl.toString());
+  const profileData = await profileRes.json();
 
-  if (!pagesRes.ok || !pagesData.data?.length) {
-    throw new Error(pagesData.error?.message || "No Facebook Pages found for Instagram connection");
-  }
-
-  const instagramPage = pagesData.data.find(
-    (page) => page.instagram_business_account?.id || page.connected_instagram_account?.id
-  );
-  const instagramAccount =
-    instagramPage?.instagram_business_account || instagramPage?.connected_instagram_account;
-
-  if (!instagramAccount?.id) {
-    throw new Error("No Instagram business account is connected to your Facebook Pages");
+  if (!profileRes.ok) {
+    throw new Error(profileData.error?.message || "Could not load Instagram profile");
   }
 
   await db.collection("integrations")
@@ -131,11 +126,11 @@ async function connectInstagram(code, uid) {
     .set(
     {
       instagram: {
-        userId: instagramAccount.id,
-        username: instagramAccount.username || null,
-        pageId: instagramPage.id,
-        pageName: instagramPage.name,
-        accessToken: instagramPage.access_token || longData.access_token,
+        userId: String(profileData.user_id || shortData.user_id),
+        username: profileData.username || null,
+        accountType: profileData.account_type || null,
+        accessToken: longData.access_token,
+        authType: "instagram_login",
         obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
         expiresInSeconds: longData.expires_in || null,
       },

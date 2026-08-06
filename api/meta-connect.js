@@ -1,4 +1,5 @@
 import admin from "firebase-admin";
+import crypto from "crypto";
 
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -15,8 +16,17 @@ const db = admin.firestore();
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v23.0";
 const META_APP_ID = process.env.META_APP_ID;
 const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
-const REDIRECT_URI =
+const LINKEDIN_CLIENT_ID = process.env.LINKEDIN_CLIENT_ID;
+const TWITTER_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
+const META_REDIRECT_URI =
   process.env.META_REDIRECT_URI || "https://bennyfix-backend-v.vercel.app/api/meta-callback";
+const INSTAGRAM_REDIRECT_URI = process.env.INSTAGRAM_REDIRECT_URI || META_REDIRECT_URI;
+const LINKEDIN_REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI || META_REDIRECT_URI;
+const TWITTER_REDIRECT_URI = process.env.TWITTER_REDIRECT_URI || META_REDIRECT_URI;
+
+function encodeState(data) {
+  return Buffer.from(JSON.stringify(data)).toString("base64url");
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -46,7 +56,7 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Admin only" });
     }
 
-    const state = `${platform}:${idToken}`;
+    const state = encodeState({ platform, idToken });
     let authorizeUrl;
 
     if (platform === "instagram") {
@@ -56,7 +66,7 @@ export default async function handler(req, res) {
 
       authorizeUrl = new URL("https://www.instagram.com/oauth/authorize");
       authorizeUrl.searchParams.set("client_id", INSTAGRAM_APP_ID);
-      authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      authorizeUrl.searchParams.set("redirect_uri", INSTAGRAM_REDIRECT_URI);
       authorizeUrl.searchParams.set("response_type", "code");
       authorizeUrl.searchParams.set(
         "scope",
@@ -72,13 +82,38 @@ export default async function handler(req, res) {
 
       authorizeUrl = new URL(`https://www.facebook.com/${GRAPH_VERSION}/dialog/oauth`);
       authorizeUrl.searchParams.set("client_id", META_APP_ID);
-      authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      authorizeUrl.searchParams.set("redirect_uri", META_REDIRECT_URI);
       authorizeUrl.searchParams.set("response_type", "code");
       authorizeUrl.searchParams.set(
         "scope",
         "pages_show_list,pages_read_engagement,pages_manage_posts"
       );
       authorizeUrl.searchParams.set("state", state);
+    } else if (platform === "linkedin") {
+      if (!LINKEDIN_CLIENT_ID) {
+        return res.status(500).json({ error: "LINKEDIN_CLIENT_ID is not configured" });
+      }
+
+      authorizeUrl = new URL("https://www.linkedin.com/oauth/v2/authorization");
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("client_id", LINKEDIN_CLIENT_ID);
+      authorizeUrl.searchParams.set("redirect_uri", LINKEDIN_REDIRECT_URI);
+      authorizeUrl.searchParams.set("scope", "openid profile w_member_social");
+      authorizeUrl.searchParams.set("state", state);
+    } else if (platform === "twitter") {
+      if (!TWITTER_CLIENT_ID) {
+        return res.status(500).json({ error: "TWITTER_CLIENT_ID is not configured" });
+      }
+
+      const codeVerifier = crypto.randomBytes(32).toString("base64url");
+      authorizeUrl = new URL("https://x.com/i/oauth2/authorize");
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("client_id", TWITTER_CLIENT_ID);
+      authorizeUrl.searchParams.set("redirect_uri", TWITTER_REDIRECT_URI);
+      authorizeUrl.searchParams.set("scope", "tweet.read tweet.write users.read offline.access");
+      authorizeUrl.searchParams.set("state", encodeState({ platform, idToken, codeVerifier }));
+      authorizeUrl.searchParams.set("code_challenge", codeVerifier);
+      authorizeUrl.searchParams.set("code_challenge_method", "plain");
     } else {
       return res.status(400).json({ error: "Unknown platform" });
     }

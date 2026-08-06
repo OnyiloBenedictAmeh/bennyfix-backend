@@ -17,13 +17,32 @@ const APP_ID = process.env.META_APP_ID;
 const APP_SECRET = process.env.META_APP_SECRET;
 const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
 const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET;
+const LINKEDIN_CLIENT_ID = process.env.LINKEDIN_CLIENT_ID;
+const LINKEDIN_CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET;
+const TWITTER_CLIENT_ID = process.env.TWITTER_CLIENT_ID;
+const TWITTER_CLIENT_SECRET = process.env.TWITTER_CLIENT_SECRET;
 // Must exactly match what's registered in the Meta App Dashboard and what
 // the frontend used to build the authorize URL. No query string on this one
 // on purpose — the platform is carried in `state` instead, so we only ever
 // need a single redirect URI registered with Meta.
-const REDIRECT_URI =
+const META_REDIRECT_URI =
   process.env.META_REDIRECT_URI || "https://bennyfix-backend-v.vercel.app/api/meta-callback";
+const INSTAGRAM_REDIRECT_URI = process.env.INSTAGRAM_REDIRECT_URI || META_REDIRECT_URI;
+const LINKEDIN_REDIRECT_URI = process.env.LINKEDIN_REDIRECT_URI || META_REDIRECT_URI;
+const TWITTER_REDIRECT_URI = process.env.TWITTER_REDIRECT_URI || META_REDIRECT_URI;
 const APP_URL = process.env.APP_URL;
+
+function decodeState(state) {
+  try {
+    return JSON.parse(Buffer.from(state, "base64url").toString("utf8"));
+  } catch (err) {
+    if (state?.includes(":")) {
+      const [platform, idToken] = state.split(":");
+      return { platform, idToken };
+    }
+    return {};
+  }
+}
 
 function redirectToAdmin(res, status, message) {
   const url = new URL("admin.html", APP_URL);
@@ -40,11 +59,14 @@ export default async function handler(req, res) {
     return redirectToAdmin(res, "error", error_description || error);
   }
 
-  if (!code || !state || !state.includes(":")) {
+  if (!code || !state) {
     return redirectToAdmin(res, "error", "Missing or malformed callback parameters");
   }
 
-  const [platform, idToken] = state.split(":");
+  const { platform, idToken, codeVerifier } = decodeState(state);
+  if (!platform || !idToken) {
+    return redirectToAdmin(res, "error", "Missing or malformed callback parameters");
+  }
 
   let decoded;
   try {
@@ -65,6 +87,10 @@ export default async function handler(req, res) {
       await connectInstagram(code, decoded.uid);
     } else if (platform === "facebook") {
       await connectFacebook(code, decoded.uid);
+    } else if (platform === "linkedin") {
+      await connectLinkedIn(code, decoded.uid);
+    } else if (platform === "twitter") {
+      await connectTwitter(code, codeVerifier, decoded.uid);
     } else {
       return redirectToAdmin(res, "error", "Unknown platform");
     }
@@ -74,6 +100,107 @@ export default async function handler(req, res) {
     console.error(err);
     return redirectToAdmin(res, "error", err.message || "Connection failed");
   }
+}
+
+async function connectLinkedIn(code, uid) {
+  if (!LINKEDIN_CLIENT_ID || !LINKEDIN_CLIENT_SECRET) {
+    throw new Error("LinkedIn app credentials are not configured");
+  }
+
+  const tokenRes = await fetch("https://www.linkedin.com/oauth/v2/accessToken", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: LINKEDIN_REDIRECT_URI,
+      client_id: LINKEDIN_CLIENT_ID,
+      client_secret: LINKEDIN_CLIENT_SECRET,
+    }),
+  });
+  const tokenData = await tokenRes.json();
+
+  if (!tokenRes.ok || !tokenData.access_token) {
+    throw new Error(tokenData.error_description || tokenData.error || "LinkedIn token exchange failed");
+  }
+
+  const profileRes = await fetch("https://api.linkedin.com/v2/userinfo", {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  });
+  const profileData = await profileRes.json();
+
+  if (!profileRes.ok || !profileData.sub) {
+    throw new Error(profileData.message || "Could not load LinkedIn profile");
+  }
+
+  await db.collection("integrations").doc(uid).set(
+    {
+      linkedin: {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token || null,
+        personId: profileData.sub,
+        name: profileData.name || null,
+        authType: "oauth2",
+        obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
+        expiresInSeconds: tokenData.expires_in || null,
+      },
+    },
+    { merge: true }
+  );
+}
+
+async function connectTwitter(code, codeVerifier, uid) {
+  if (!TWITTER_CLIENT_ID || !codeVerifier) {
+    throw new Error("X app credentials are not configured");
+  }
+
+  const headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  if (TWITTER_CLIENT_SECRET) {
+    const basic = Buffer.from(`${TWITTER_CLIENT_ID}:${TWITTER_CLIENT_SECRET}`).toString("base64");
+    headers.Authorization = `Basic ${basic}`;
+  }
+
+  const tokenRes = await fetch("https://api.x.com/2/oauth2/token", {
+    method: "POST",
+    headers,
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: TWITTER_REDIRECT_URI,
+      client_id: TWITTER_CLIENT_ID,
+      code_verifier: codeVerifier,
+    }),
+  });
+  const tokenData = await tokenRes.json();
+
+  if (!tokenRes.ok || !tokenData.access_token) {
+    throw new Error(tokenData.error_description || tokenData.error || "X token exchange failed");
+  }
+
+  const userRes = await fetch("https://api.x.com/2/users/me?user.fields=username,name", {
+    headers: { Authorization: `Bearer ${tokenData.access_token}` },
+  });
+  const userData = await userRes.json();
+
+  if (!userRes.ok || !userData.data?.id) {
+    throw new Error(userData.detail || "Could not load X profile");
+  }
+
+  await db.collection("integrations").doc(uid).set(
+    {
+      twitter: {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token || null,
+        userId: userData.data.id,
+        username: userData.data.username || null,
+        name: userData.data.name || null,
+        authType: "oauth2_pkce",
+        obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
+        expiresInSeconds: tokenData.expires_in || null,
+      },
+    },
+    { merge: true }
+  );
 }
 
 async function connectInstagram(code, uid) {
@@ -88,7 +215,7 @@ async function connectInstagram(code, uid) {
       client_id: INSTAGRAM_APP_ID,
       client_secret: INSTAGRAM_APP_SECRET,
       grant_type: "authorization_code",
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: INSTAGRAM_REDIRECT_URI,
       code,
     }),
   });
@@ -110,13 +237,20 @@ async function connectInstagram(code, uid) {
     throw new Error(longData.error?.message || "Instagram long-lived token exchange failed");
   }
 
-  const profileUrl = new URL(`https://graph.instagram.com/${GRAPH_VERSION}/${shortData.user_id}`);
-  profileUrl.searchParams.set("fields", "user_id,username,account_type");
-  profileUrl.searchParams.set("access_token", longData.access_token);
+ const profileUrl = new URL("https://graph.instagram.com/me");
 
-  const profileRes = await fetch(profileUrl.toString());
-  const profileData = await profileRes.json();
+profileUrl.searchParams.set(
+    "fields",
+    "id,username,account_type"
+);
 
+profileUrl.searchParams.set(
+    "access_token",
+    longData.access_token
+);
+
+const profileRes = await fetch(profileUrl.toString());
+const profileData = await profileRes.json();
   if (!profileRes.ok) {
     throw new Error(profileData.error?.message || "Could not load Instagram profile");
   }
@@ -126,7 +260,7 @@ async function connectInstagram(code, uid) {
     .set(
     {
       instagram: {
-        userId: String(profileData.user_id || shortData.user_id),
+        userId: String(profileData.id),
         username: profileData.username || null,
         accountType: profileData.account_type || null,
         accessToken: longData.access_token,
@@ -144,7 +278,7 @@ async function connectFacebook(code, uid) {
   const shortUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
   shortUrl.searchParams.set("client_id", APP_ID);
   shortUrl.searchParams.set("client_secret", APP_SECRET);
-  shortUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+  shortUrl.searchParams.set("redirect_uri", META_REDIRECT_URI);
   shortUrl.searchParams.set("code", code);
 
   const shortRes = await fetch(shortUrl.toString());

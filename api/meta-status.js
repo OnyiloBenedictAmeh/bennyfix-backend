@@ -58,6 +58,17 @@ export default async function handler(req, res) {
         accountType: meta.instagram?.accountType || null,
         authType: meta.instagram?.authType || null,
       },
+      linkedin: {
+        connected: !!meta.linkedin?.accessToken,
+        personId: meta.linkedin?.personId || null,
+        name: meta.linkedin?.name || null,
+      },
+      twitter: {
+        connected: !!meta.twitter?.accessToken,
+        userId: meta.twitter?.userId || null,
+        username: meta.twitter?.username || null,
+        name: meta.twitter?.name || null,
+      },
     });
   } catch (err) {
     console.error(err);

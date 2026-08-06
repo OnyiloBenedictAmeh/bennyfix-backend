@@ -90,6 +90,20 @@ export default async function handler(req, res) {
       }));
     }
 
+    if (requestedPlatforms.includes("linkedin")) {
+      results.linkedin = await publishToLinkedIn({ meta, caption, images }).catch((err) => ({
+        success: false,
+        error: err.message,
+      }));
+    }
+
+    if (requestedPlatforms.includes("twitter")) {
+      results.twitter = await publishToTwitter({ meta, caption, images }).catch((err) => ({
+        success: false,
+        error: err.message,
+      }));
+    }
+
     const anySucceeded = Object.values(results).some((r) => r.success);
 
     await postRef.update({
@@ -102,6 +116,86 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message || "Could not publish post" });
+  }
+}
+
+async function publishToLinkedIn({ meta, caption, images }) {
+  const token = meta.linkedin?.accessToken;
+  const personId = meta.linkedin?.personId;
+
+  if (!token || !personId) {
+    throw new Error("LinkedIn isn't connected yet");
+  }
+
+  if (images.length) {
+    throw new Error("LinkedIn image publishing is not enabled yet");
+  }
+
+  const res = await fetch("https://api.linkedin.com/v2/ugcPosts", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Restli-Protocol-Version": "2.0.0",
+    },
+    body: JSON.stringify({
+      author: `urn:li:person:${personId}`,
+      lifecycleState: "PUBLISHED",
+      specificContent: {
+        "com.linkedin.ugc.ShareContent": {
+          shareCommentary: { text: caption },
+          shareMediaCategory: "NONE",
+        },
+      },
+      visibility: {
+        "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC",
+      },
+    }),
+  });
+
+  const text = await res.text();
+  const data = text ? safeJson(text) : {};
+
+  if (!res.ok) {
+    throw new Error(data.message || data.error_description || "LinkedIn post failed");
+  }
+
+  return { success: true, id: res.headers.get("x-restli-id") || data.id || null };
+}
+
+async function publishToTwitter({ meta, caption, images }) {
+  const token = meta.twitter?.accessToken;
+
+  if (!token) {
+    throw new Error("X/Twitter isn't connected yet");
+  }
+
+  if (images.length) {
+    throw new Error("X/Twitter image publishing is not enabled yet");
+  }
+
+  const res = await fetch("https://api.x.com/2/tweets", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text: caption }),
+  });
+  const data = await res.json();
+
+  if (!res.ok || !data.data?.id) {
+    throw new Error(data.detail || data.title || "X/Twitter post failed");
+  }
+
+  return { success: true, id: data.data.id, text: data.data.text };
+}
+
+function safeJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    return { message: text };
   }
 }
 
@@ -121,9 +215,7 @@ async function publishToFacebook({ meta, caption, images, pageIds = [] }) {
     throw new Error("No selected Facebook Pages are connected");
   }
 
-  const base = meta.instagram?.authType === "instagram_login"
-    ? `https://graph.instagram.com/${GRAPH_VERSION}`
-    : `https://graph.facebook.com/${GRAPH_VERSION}`;
+  const base = `https://graph.facebook.com/${GRAPH_VERSION}`;
   const results = {};
 
   for (const page of targetPages) {

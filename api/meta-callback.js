@@ -1,5 +1,10 @@
 import admin from "firebase-admin";
-
+import {
+    saveFacebook,
+    saveInstagram,
+    saveLinkedIn,
+    saveTwitter
+} from "./social-store.js";
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -83,26 +88,36 @@ export default async function handler(req, res) {
       return redirectToAdmin(res, "error", "Admin only");
     }
 
-    if (platform === "instagram") {
-      await connectInstagram(code, decoded.uid);
-    } else if (platform === "facebook") {
-      await connectFacebook(code, decoded.uid);
-    } else if (platform === "linkedin") {
-      await connectLinkedIn(code, decoded.uid);
-    } else if (platform === "twitter") {
-      await connectTwitter(code, codeVerifier, decoded.uid);
-    } else {
-      return redirectToAdmin(res, "error", "Unknown platform");
+    const connectors = {
+    facebook: connectFacebook,
+    instagram: connectInstagram,
+    linkedin: connectLinkedIn,
+};
+
+if (platform === "twitter") {
+    await connectTwitter(code, codeVerifier);
+} else {
+    const fn = connectors[platform];
+
+    if (!fn) {
+        return redirectToAdmin(res, "error", "Unknown platform");
     }
 
-    return redirectToAdmin(res, "success", `${platform} connected`);
+    await fn(code);
+}
+
+return redirectToAdmin(
+    res,
+    "success",
+    `${platform} connected`
+);
   } catch (err) {
     console.error(err);
     return redirectToAdmin(res, "error", err.message || "Connection failed");
   }
 }
 
-async function connectLinkedIn(code, uid) {
+async function connectLinkedIn(code) {
   if (!LINKEDIN_CLIENT_ID || !LINKEDIN_CLIENT_SECRET) {
     throw new Error("LinkedIn app credentials are not configured");
   }
@@ -133,23 +148,10 @@ async function connectLinkedIn(code, uid) {
     throw new Error(profileData.message || "Could not load LinkedIn profile");
   }
 
-  await db.collection("integrations").doc(uid).set(
-    {
-      linkedin: {
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token || null,
-        personId: profileData.sub,
-        name: profileData.name || null,
-        authType: "oauth2",
-        obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
-        expiresInSeconds: tokenData.expires_in || null,
-      },
-    },
-    { merge: true }
-  );
+await saveLinkedIn(profileData, tokenData);
 }
 
-async function connectTwitter(code, codeVerifier, uid) {
+async function connectTwitter(code, codeVerifier) {
   if (!TWITTER_CLIENT_ID || !codeVerifier) {
     throw new Error("X app credentials are not configured");
   }
@@ -186,24 +188,10 @@ async function connectTwitter(code, codeVerifier, uid) {
     throw new Error(userData.detail || "Could not load X profile");
   }
 
-  await db.collection("integrations").doc(uid).set(
-    {
-      twitter: {
-        accessToken: tokenData.access_token,
-        refreshToken: tokenData.refresh_token || null,
-        userId: userData.data.id,
-        username: userData.data.username || null,
-        name: userData.data.name || null,
-        authType: "oauth2_pkce",
-        obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
-        expiresInSeconds: tokenData.expires_in || null,
-      },
-    },
-    { merge: true }
-  );
+ await saveTwitter(userData, tokenData);
 }
 
-async function connectInstagram(code, uid) {
+async function connectInstagram(code) {
   if (!INSTAGRAM_APP_ID || !INSTAGRAM_APP_SECRET) {
     throw new Error("Instagram app credentials are not configured");
   }
@@ -255,25 +243,10 @@ const profileData = await profileRes.json();
     throw new Error(profileData.error?.message || "Could not load Instagram profile");
   }
 
-  await db.collection("integrations")
-    .doc(uid)
-    .set(
-    {
-      instagram: {
-        userId: String(profileData.id),
-        username: profileData.username || null,
-        accountType: profileData.account_type || null,
-        accessToken: longData.access_token,
-        authType: "instagram_login",
-        obtainedAt: admin.firestore.FieldValue.serverTimestamp(),
-        expiresInSeconds: longData.expires_in || null,
-      },
-    },
-    { merge: true }
-  );
+ await saveInstagram(profileData, longData);
 }
 
-async function connectFacebook(code, uid) {
+async function connectFacebook(code) {
   // Step 1: exchange the authorization code for a short-lived user token.
   const shortUrl = new URL(`https://graph.facebook.com/${GRAPH_VERSION}/oauth/access_token`);
   shortUrl.searchParams.set("client_id", APP_ID);
@@ -327,16 +300,5 @@ async function connectFacebook(code, uid) {
 
   // Full overwrite: /me/accounts always returns the complete current set
   // for this login, so this naturally drops Pages you no longer manage.
-  await db.collection("integrations")
-    .doc(uid)
-    .set(
-    {
-      facebook: {
-        accessToken: longData.access_token,
-        pages,
-        connectedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-    },
-    { merge: true }
-  );
+ await saveFacebook(pages, longData);
 }

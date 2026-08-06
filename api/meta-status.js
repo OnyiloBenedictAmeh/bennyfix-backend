@@ -1,5 +1,5 @@
 import admin from "firebase-admin";
-
+import { getSocialSettings } from "./social-store.js";
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -10,7 +10,7 @@ if (!admin.apps.length) {
   });
 }
 
-const db = admin.firestore();
+// const db = admin.firestore();
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -40,36 +40,36 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Admin only" });
     }
 
-    let metaSnap = await db.collection("integrations").doc(decoded.uid).get();
-    if (!metaSnap.exists) {
-      metaSnap = await db.collection("integrations").doc("meta").get();
-    }
-    const meta = metaSnap.exists ? metaSnap.data() : {};
+    const meta = await getSocialSettings();
 
-    return res.status(200).json({
-      facebook: {
-        connected: (meta.facebook?.pages || []).length > 0 || !!meta.facebook?.pageAccessToken,
+return res.status(200).json({
+    facebook: {
+        connected:
+             !!meta.facebook?.connected,
         pages: normalizeFacebookPages(meta.facebook),
-      },
-      instagram: {
-        connected: !!meta.instagram?.accessToken,
+    },
+
+    instagram: {
+        connected: !!meta.instagram?.connected,
         userId: meta.instagram?.userId || null,
         username: meta.instagram?.username || null,
         accountType: meta.instagram?.accountType || null,
         authType: meta.instagram?.authType || null,
-      },
-      linkedin: {
-        connected: !!meta.linkedin?.accessToken,
+    },
+
+    linkedin: {
+        connected: !!meta.linkedin?.connected,
         personId: meta.linkedin?.personId || null,
         name: meta.linkedin?.name || null,
-      },
-      twitter: {
-        connected: !!meta.twitter?.accessToken,
+    },
+
+    twitter: {
+        connected: !!meta.twitter?.connected,
         userId: meta.twitter?.userId || null,
         username: meta.twitter?.username || null,
         name: meta.twitter?.name || null,
-      },
-    });
+    },
+});
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message || "Could not load status" });
@@ -77,21 +77,9 @@ export default async function handler(req, res) {
 }
 
 function normalizeFacebookPages(facebook = {}) {
-  if (Array.isArray(facebook.pages) && facebook.pages.length) {
-    return facebook.pages.map((page) => ({
-      pageId: page.pageId,
-      pageName: page.pageName,
-      tasks: page.tasks || [],
+    return (facebook.pages || []).map(page => ({
+        pageId: page.pageId,
+        pageName: page.pageName,
+        tasks: page.tasks || [],
     }));
-  }
-
-  if (facebook.pageId) {
-    return [{
-      pageId: facebook.pageId,
-      pageName: facebook.pageName || "Facebook Page",
-      tasks: facebook.tasks || [],
-    }];
-  }
-
-  return [];
 }

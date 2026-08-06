@@ -1,5 +1,5 @@
 import admin from "firebase-admin";
-
+ import { getSocial } from "./social-store.js";
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -63,12 +63,10 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "No platforms selected on this post" });
     }
 
-    let metaSnap = await db.collection("integrations").doc(decoded.uid).get();
-    if (!metaSnap.exists) {
-      metaSnap = await db.collection("integrations").doc("meta").get();
-    }
-    const meta = metaSnap.exists ? metaSnap.data() : {};
+   
 
+
+const meta = await getSocial();
     const results = {};
 
     if (requestedPlatforms.includes("facebook")) {
@@ -258,13 +256,9 @@ function normalizeFacebookPagesForPublish(facebook = {}) {
     return facebook.pages;
   }
 
-  if (facebook.pageId && facebook.pageAccessToken) {
-    return [{
-      pageId: facebook.pageId,
-      pageName: facebook.pageName || "Facebook Page",
-      pageAccessToken: facebook.pageAccessToken,
-    }];
-  }
+  function normalizeFacebookPagesForPublish(facebook = {}) {
+    return facebook.pages || [];
+}
 
   return [];
 }
@@ -351,10 +345,7 @@ async function publishToInstagram({ meta, caption, images }) {
     throw new Error("Instagram posts need at least one image");
   }
 
-  const base = meta.instagram?.authType === "instagram_login"
-    ? `https://graph.instagram.com/${GRAPH_VERSION}`
-    : `https://graph.facebook.com/${GRAPH_VERSION}`;
-
+ const base = `https://graph.facebook.com/${GRAPH_VERSION}`;
   if (images.length === 1) {
     const creationId = await createContainer({
       base,
